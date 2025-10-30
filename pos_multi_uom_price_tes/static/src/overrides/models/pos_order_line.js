@@ -1,0 +1,246 @@
+/** © 2025 ehuerta _at_ ixer.mx
+ * License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl-3.0.html).
+ */
+
+import { PosOrderline } from "@point_of_sale/app/models/pos_order_line";
+import { patch } from "@web/core/utils/patch";
+import { _t } from "@web/core/l10n/translation";
+import { formatFloat, roundPrecision } from "@web/core/utils/numbers";
+
+
+patch(PosOrderline.prototype, {
+    setup() {
+        super.setup(...arguments);
+
+        // Check refund case terlebih dahulu
+        const allLineToRefundUuids = this.models["pos.order"].reduce((acc, order) => {
+            Object.assign(acc, order.uiState.lineToRefund);
+            return acc;
+        }, {});
+        
+        const isRefundLine = this.refunded_orderline_id?.uuid in allLineToRefundUuids;
+        
+        if (isRefundLine) {
+            // Untuk refund, HARUS pakai UOM yang sama dengan line asli
+            this.product_uom_id = this.refunded_orderline_id.product_uom_id || this.product_id.uom_id;
+            return; // Skip logic multi UoM untuk refund
+        }
+
+        // Handle UOM untuk line baru
+        // Cek apakah UOM sudah di-set (misalnya dari merge atau load)
+        const hasExistingUom = this.product_uom_id && this.product_uom_id.id;
+        
+        if (!hasExistingUom) {
+            // Cari multi UOM price untuk produk ini
+            const multiUomPrices = this.models["product.multi.uom.price"]?.filter(
+                rec => rec.product_id.id === this.product_id.id
+            ) || [];
+
+            if (multiUomPrices.length > 0) {
+                // Gunakan UoM pertama dari multi_uom_price
+                const firstUomPrice = multiUomPrices[0];
+                this.product_uom_id = firstUomPrice.uom_id;
+                
+                // Set harga HANYA jika price_type belum di-set (line baru)
+                // Ini untuk menghormati pricelist, promosi, dll
+                if (!this.price_type || this.price_type === "original") {
+                    this.set_unit_price(firstUomPrice.price);
+                    // Tandai sebagai original agar bisa di-recalculate jika qty berubah
+                    this.price_type = "original";
+                }
+            } else {
+                // Fallback ke UoM default produk
+                this.product_uom_id = this.product_id.uom_id;
+            }
+        }
+    },
+
+    set_uom(uom_id) {
+        this.product_uom_id = uom_id;
+        // Update harga sesuai dengan UOM yang dipilih
+        // HANYA jika bukan manual price (untuk hormati user edit)
+        if (this.price_type !== "manual") {
+            this._updatePriceForUom(uom_id);
+        }
+    },
+
+    _updatePriceForUom(uom_id) {
+        if (!uom_id) return;
+        
+        // Cari harga untuk UOM yang dipilih
+        const multiUomPrice = this.models["product.multi.uom.price"]?.find(
+            rec => rec.product_id.id === this.product_id.id && rec.uom_id.id === uom_id.id
+        );
+
+        if (multiUomPrice) {
+            this.set_unit_price(multiUomPrice.price);
+            this.price_type = "original";
+            print("hel0") // Bukan "manual" agar bisa di-recalculate
+        } else {
+            // Jika UOM custom TIDAK punya harga khusus, JANGAN ubah harga unit price.
+            // Biarkan harga yang sudah dihitung (mungkin dari pricelist default atau product.list_price)
+            // tetap ada, dan set price_type ke 'original' agar Pricelist tetap dapat dihitung.
+            this.price_type = "original";
+            
+            // Opsional: Untuk memastikan Pricelist Odoo standar berjalan saat UOM diganti,
+            // kita bisa memanggil Pricelist standar di sini, tapi itu bisa berulang.
+            // Lebih baik biarkan recompute di bawah yang memicu Pricelist Odoo.
+        }
+        
+        // Panggil recompute agar Pricelist Odoo menghitung ulang
+        // (ini adalah kunci agar pricelist Odoo mengambil alih harga yang baru saja Anda set).
+        this.order_id.recomputeOrderData();
+        this.setDirty();
+    },
+    
+    get quantityStr() {
+        let qtyStr = "";
+        const unit = this.product_uom_id;
+
+        if (unit) {
+            if (unit.rounding) {
+                const decimals = this.models["decimal.precision"].find(
+                    (dp) => dp.name === "Product Unit of Measure"
+                ).digits;
+                qtyStr = formatFloat(this.qty, {
+                    digits: [69, decimals],
+                });
+            } else {
+                qtyStr = this.qty.toFixed(0);
+            }
+        } else {
+            qtyStr = "" + this.qty;
+        }
+
+        return qtyStr;
+    },
+    
+    set_quantity(quantity, keep_price) {
+        this.order_id.assert_editable();
+        const quant =
+            typeof quantity === "number" ? quantity : parseFloat("" + (quantity ? quantity : 0));
+
+        const allLineToRefundUuids = this.models["pos.order"].reduce((acc, order) => {
+            Object.assign(acc, order.uiState.lineToRefund);
+            return acc;
+        }, {});
+
+        if (this.refunded_orderline_id?.uuid in allLineToRefundUuids) {
+            const refundDetails = allLineToRefundUuids[this.refunded_orderline_id.uuid];
+            const maxQtyToRefund = refundDetails.line.qty - refundDetails.line.refunded_qty;
+            if (quant > 0) {
+                return {
+                    title: _t("Positive quantity not allowed"),
+                    body: _t(
+                        "Only a negative quantity is allowed for this refund line. Click on +/- to modify the quantity to be refunded."
+                    ),
+                };
+            } else if (quant == 0) {
+                refundDetails.qty = 0;
+            } else if (-quant <= maxQtyToRefund) {
+                refundDetails.qty = -quant;
+            } else {
+                return {
+                    title: _t("Greater than allowed"),
+                    body: _t(
+                        "The requested quantity to be refunded is higher than the refundable quantity."
+                    ),
+                };
+            }
+        }
+        
+        const unit = this.product_uom_id;
+        if (unit) {
+            if (unit.rounding) {
+                const decimals = this.models["decimal.precision"].find(
+                    (dp) => dp.name === "Product Unit of Measure"
+                ).digits;
+                const rounding = Math.max(unit.rounding, Math.pow(10, -decimals));
+                this.qty = roundPrecision(quant, rounding);
+            } else {
+                this.qty = roundPrecision(quant, 1);
+            }
+        } else {
+            this.qty = quant;
+        }
+
+        // Recalculate price jika bukan manual price
+        // Untuk multi UoM, cek apakah ada price khusus untuk UOM ini
+        // if (!keep_price && this.price_type === "original") {
+        //     // Coba cari price dari multi UoM terlebih dahulu
+        //     const multiUomPrice = this.models["product.multi.uom.price"]?.find(
+        //         rec => rec.product_id.id === this.product_id.id && 
+        //                rec.uom_id.id === this.product_uom_id.id
+        //     );
+            
+        //     if (multiUomPrice) {
+        //         this.set_unit_price(multiUomPrice.price);
+        //     } else {
+        //         // Fallback ke pricelist default
+        //         this.set_unit_price(
+        //             this.product_id.get_price(
+        //                 this.order_id.pricelist_id,
+        //                 this.get_quantity(),
+        //                 this.get_price_extra()
+        //             )
+        //         );
+        //     }
+        // }
+        if (!keep_price && this.price_type === "original") {
+            // Gunakan logika bawaan Odoo untuk menghitung harga
+            if (this.isLotTracked()) {
+                const related_lines = [];
+                const price = this.product_id.get_price(
+                    this.order_id.pricelist_id,
+                    this.get_quantity(),
+                    this.get_price_extra(),
+                    false,
+                    false,
+                    this,
+                    related_lines
+                );
+                related_lines.forEach((line) => line.set_unit_price(price));
+            } else {
+                this.set_unit_price(
+                    this.product_id.get_price(
+                        this.order_id.pricelist_id,
+                        this.get_quantity(),
+                        this.get_price_extra()
+                    )
+                );
+            }
+        }
+
+        this.setDirty();
+        return true;
+    },
+    
+    getDisplayData() {
+        const vals = super.getDisplayData(...arguments);
+        vals.unit = this.product_uom_id ? this.product_uom_id.name : "";
+        return vals;
+    },
+    
+    get_unit() {
+        return this.product_uom_id;
+    },
+    
+    is_pos_groupable() {
+        const unit_groupable = this.product_uom_id
+            ? this.product_uom_id.is_pos_groupable
+            : false;
+        return unit_groupable && !this.isPartOfCombo();
+    },
+
+    // serialize() {
+    //     const result = super.serialize(...arguments);
+    //     // Pastikan product_uom_id selalu ter-serialize dengan benar
+    //     if (this.product_uom_id) {
+    //         result.product_uom_id = this.product_uom_id.id;
+    //     } else if (this.product_id) {
+    //         // Fallback ke default UOM jika somehow tidak ada
+    //         result.product_uom_id = this.product_id.uom_id.id;
+    //     }
+    //     return result;
+    // }
+});
