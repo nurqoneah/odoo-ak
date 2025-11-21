@@ -1,0 +1,3 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_hr_employee_pos_user,hr.employee.pos.user,hr.model_hr_employee,point_of_sale.group_pos_user,1,0,0,0
+access_hr_employee_pos_manager,hr.employee.pos.manager,hr.model_hr_employee,point_of_sale.group_pos_manager,1,1,1,0

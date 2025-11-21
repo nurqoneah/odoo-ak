@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_employee_form_pos_access" model="ir.ui.view">
+        <field name="name">hr.employee.form.pos.access</field>
+        <field name="model">hr.employee</field>
+        <field name="inherit_id" ref="hr.view_employee_form"/>
+        <field name="arch" type="xml">
+            <notebook position="inside">
+                <page string="POS Access Control" name="pos_access">
+                    <group>
+                        <group string="Order Operations">
+                            <field name="pos_allow_order_delete"/>
+                            <field name="pos_allow_orderline_delete"/>
+                            <field name="pos_allow_payment"/>
+                            <field name="pos_allow_refund"/>
+                        </group>
+                        <group string="Pricing Operations">
+                            <field name="pos_allow_discount"/>
+                            <field name="pos_allow_price_change"/>
+                            <field name="pos_allow_pricelist"/>
+                            <field name="pos_allow_fiscal_position"/>
+                        </group>
+                        <group string="Inventory Operations">
+                            <field name="pos_allow_qty_decrease"/>
+                            <field name="pos_allow_create_product"/>
+                        </group>
+                        <group string="Session Operations">
+                            <field name="pos_allow_closing"/>
+                            <field name="pos_allow_cash_inout"/>
+                        </group>
+                    </group>
+                </page>
+            </notebook>
+        </field>
+    </record>
+</odoo>
